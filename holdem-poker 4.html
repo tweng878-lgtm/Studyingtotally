@@ -1,0 +1,1050 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Hold'em Poker 🃏</title>
+<script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:Georgia,serif;background:#061020;overflow:hidden;}
+input,button{font-family:Georgia,serif;}
+input{outline:none;}
+input:focus{border-color:#378ADD!important;}
+::-webkit-scrollbar{width:4px;}
+::-webkit-scrollbar-track{background:transparent;}
+::-webkit-scrollbar-thumb{background:#1e3a5f;border-radius:2px;}
+
+/* ── Card deal animation ── */
+@keyframes dealCard{
+  0%  {transform:translate(-50vw,-30vh) rotate(-20deg) scale(0.4);opacity:0;}
+  60% {transform:translate(4px,-4px) rotate(2deg) scale(1.05);opacity:1;}
+  100%{transform:translate(0,0) rotate(0deg) scale(1);opacity:1;}
+}
+@keyframes flipCard{
+  0%  {transform:rotateY(90deg) scale(0.9);}
+  100%{transform:rotateY(0deg) scale(1);}
+}
+@keyframes communityReveal{
+  0%  {transform:translateY(-40px) scale(0.7) rotate(-8deg);opacity:0;}
+  70% {transform:translateY(3px) scale(1.04) rotate(1deg);opacity:1;}
+  100%{transform:translateY(0) scale(1) rotate(0deg);opacity:1;}
+}
+@keyframes chipPulse{
+  0%,100%{box-shadow:0 0 0 0 rgba(250,199,117,0);}
+  50%{box-shadow:0 0 0 8px rgba(250,199,117,0.15);}
+}
+@keyframes winGlow{
+  0%,100%{box-shadow:0 0 20px rgba(250,199,117,0.3);}
+  50%{box-shadow:0 0 60px rgba(250,199,117,0.7);}
+}
+@keyframes slideIn{
+  from{opacity:0;transform:translateY(-8px);}
+  to{opacity:1;transform:translateY(0);}
+}
+@keyframes fadeIn{
+  from{opacity:0;}to{opacity:1;}
+}
+.deal-anim{animation:dealCard 0.55s cubic-bezier(.22,.68,0,1.2) forwards;}
+.flip-anim{animation:flipCard 0.35s ease-out forwards;}
+.community-anim{animation:communityReveal 0.5s cubic-bezier(.22,.68,0,1.2) forwards;}
+.slide-in{animation:slideIn 0.3s ease-out forwards;}
+.fade-in{animation:fadeIn 0.4s ease-out forwards;}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const {useState,useEffect,useRef,useCallback}=React;
+
+// ── Shared room store (window-level so multiple tabs on same page work) ──
+if(!window._POKER_ROOMS) window._POKER_ROOMS={};
+const ROOMS=window._POKER_ROOMS;
+
+// ── Constants ──
+const SUITS=["♠","♥","♦","♣"];
+const RANKS=["2","3","4","5","6","7","8","9","10","J","Q","K","A"];
+const RV={"2":2,"3":3,"4":4,"5":5,"6":6,"7":7,"8":8,"9":9,"10":10,"J":11,"Q":12,"K":13,"A":14};
+const BOT_NAMES=["Atlas","Nova","Deckard","Roxie","Jinx","Colt"];
+const BOT_AVATARS=["🤖","👾","🦊","🐺","🎭","🦅"];
+
+// ── Difficulty ──
+const DIFF={
+  easy:  {label:"Easy",   color:"#1D9E75",bg:"rgba(29,158,117,0.15)",  foldP:0.40,callP:0.45,raiseP:0.15,bluffP:0.05,rMul:1,tMin:700,tMax:1100},
+  hard:  {label:"Hard",   color:"#FAC775",bg:"rgba(250,199,117,0.15)", foldP:0.22,callP:0.42,raiseP:0.36,bluffP:0.18,rMul:2,tMin:600,tMax:1000},
+  difficult:{label:"Difficult",color:"#e24b4a",bg:"rgba(226,75,74,0.15)",foldP:0.12,callP:0.30,raiseP:0.58,bluffP:0.35,rMul:3,tMin:350,tMax:700},
+};
+
+function botDecide(bot,g){
+  const d=DIFF[bot.difficulty||"easy"];
+  const toCall=g.currentBet-bot.bet;
+  const str=getBestHand(bot.hole||[],g.community).rank;
+  const r=Math.random();
+  const bluff=Math.random()<d.bluffP;
+  if(bot.difficulty==="difficult"){
+    if(toCall===0){return str>=2||bluff?"raise":"check";}
+    if(str>=3||bluff){return r<0.55?"raise":"call";}
+    if(str>=1){return r<0.65?"call":"fold";}
+    return r<0.25?"call":"fold";
+  }
+  if(bot.difficulty==="hard"){
+    if(toCall===0){return r<d.raiseP?"raise":"check";}
+    if(str>=1||bluff){const q=Math.random();if(q<d.raiseP)return"raise";if(q<d.raiseP+d.callP)return"call";return"fold";}
+    return r<0.35?"call":"fold";
+  }
+  if(toCall===0){return r<d.raiseP?"raise":"check";}
+  const q=Math.random();
+  if(q<d.foldP)return"fold";
+  if(q<d.foldP+d.callP)return"call";
+  return"raise";
+}
+
+// ── Deck & hand eval ──
+function mkDeck(){const d=[];for(const s of SUITS)for(const r of RANKS)d.push({suit:s,rank:r});return d.sort(()=>Math.random()-0.5);}
+function cClr(s){return s==="♥"||s==="♦"?"#e24b4a":"#1a1a1a";}
+function genCode(){return Math.random().toString(36).slice(2,7).toUpperCase();}
+
+function evalHand(cards){
+  if(cards.length<2)return{rank:0,name:"—"};
+  const vals=cards.map(c=>RV[c.rank]).sort((a,b)=>b-a);
+  const suits=cards.map(c=>c.suit);
+  const rc={};vals.forEach(v=>rc[v]=(rc[v]||0)+1);
+  const counts=Object.values(rc).sort((a,b)=>b-a);
+  const isF=cards.length>=5&&suits.every(s=>s===suits[0]);
+  const uv=[...new Set(vals)].sort((a,b)=>b-a);
+  const isS=uv.length>=5&&uv[0]-uv[4]===4;
+  const isLA=uv.length>=5&&JSON.stringify(uv.slice(0,5))==='[14,5,4,3,2]';
+  if(isF&&(isS||isLA))return{rank:8,name:"Straight Flush"};
+  if(counts[0]===4)return{rank:7,name:"Four of a Kind"};
+  if(counts[0]===3&&counts[1]===2)return{rank:6,name:"Full House"};
+  if(isF)return{rank:5,name:"Flush"};
+  if(isS||isLA)return{rank:4,name:"Straight"};
+  if(counts[0]===3)return{rank:3,name:"Three of a Kind"};
+  if(counts[0]===2&&counts[1]===2)return{rank:2,name:"Two Pair"};
+  if(counts[0]===2)return{rank:1,name:"Pair"};
+  return{rank:0,name:"High Card"};
+}
+function getBestHand(hole,community){
+  const all=[...hole,...community];
+  if(all.length<2)return{rank:0,name:"—"};
+  return evalHand(all);
+}
+
+// ── Game logic ──
+function initGame(room){
+  const deck=mkDeck();
+  const players=room.players.map(p=>({...p,chips:p.chips||1000,hole:[deck.pop(),deck.pop()],bet:0,folded:false}));
+  const sb=5,bb=10;
+  players[0].chips-=sb;players[0].bet=sb;
+  players[1].chips-=bb;players[1].bet=bb;
+  return{players,deck,community:[],pot:sb+bb,currentBet:bb,stage:"preflop",
+    activeIdx:2%players.length,winner:null,log:["Hand started — blinds posted."],sb,bb,dealing:true};
+}
+
+function advStage(g){
+  const{stage,deck,community}=g;
+  let nc=[...community],ns;
+  if(stage==="preflop"){nc=[...community,deck.pop(),deck.pop(),deck.pop()];ns="flop";}
+  else if(stage==="flop"){nc=[...community,deck.pop()];ns="turn";}
+  else if(stage==="turn"){nc=[...community,deck.pop()];ns="river";}
+  else{ns="showdown";}
+  return{...g,community:nc,stage:ns,currentBet:0,
+    players:g.players.map(p=>({...p,bet:0})),activeIdx:findFirst(g.players,1)};
+}
+
+function findFirst(players,start){
+  let i=start%players.length,laps=0;
+  while(players[i].folded&&laps<players.length){i=(i+1)%players.length;laps++;}
+  return i;
+}
+
+function pickWinner(g){
+  const alive=g.players.filter(p=>!p.folded);
+  if(alive.length===1)return{...g,winner:alive[0],stage:"done",log:[...g.log,`${alive[0].name} wins $${g.pot}!`]};
+  let best=null,winner=null;
+  for(const p of alive){const h=getBestHand(p.hole,g.community);if(!best||h.rank>best.rank){best=h;winner=p;}}
+  return{...g,winner,stage:"done",log:[...g.log,`${winner.name} wins with ${best.name}! ($${g.pot})`]};
+}
+
+function applyAction(g,idx,action,amount=0){
+  let players=g.players.map(p=>({...p}));
+  let pot=g.pot,cb=g.currentBet,log=[...g.log];
+  const p=players[idx];
+  if(action==="fold"){p.folded=true;log.push(`${p.name} folds`);}
+  else if(action==="check"){log.push(`${p.name} checks`);}
+  else if(action==="call"){
+    const tc=Math.min(cb-p.bet,p.chips);
+    p.chips-=tc;pot+=tc;p.bet+=tc;
+    log.push(`${p.name} calls $${tc}`);
+  }else if(action==="raise"){
+    const total=Math.min(cb+amount,p.chips+p.bet);
+    const add=total-p.bet;
+    p.chips-=add;pot+=add;p.bet=total;cb=total;
+    log.push(`${p.name} raises to $${total}`);
+  }
+  const alive=players.filter(p=>!p.folded);
+  if(alive.length===1)return pickWinner({...g,players,pot,currentBet:cb,log});
+  let ni=(idx+1)%players.length,laps=0;
+  while(players[ni].folded&&laps<players.length){ni=(ni+1)%players.length;laps++;}
+  const allDone=players.filter(p=>!p.folded).every(p=>p.bet===cb||p.chips===0);
+  if(allDone&&(ni<=idx||action==="fold")){
+    const ng=advStage({...g,players,pot,currentBet:cb,log});
+    if(ng.stage==="showdown")return pickWinner(ng);
+    return ng;
+  }
+  return{...g,players,pot,currentBet:cb,activeIdx:ni,log};
+}
+
+// ════════════════════════════════════════════════════
+// ── Animated Card Component ──
+// ════════════════════════════════════════════════════
+function Card({card,hidden,small,animClass,animDelay}){
+  const w=small?36:58,h=small?50:80,fs=small?10:15;
+  const base={width:w,height:h,borderRadius:6,flexShrink:0,display:"flex",
+    flexDirection:"column",alignItems:"center",justifyContent:"center",
+    animationDelay:animDelay||"0s",opacity:animClass?0:1};
+  if(!card||hidden)return(
+    <div className={animClass||""} style={{...base,background:"linear-gradient(135deg,#1a5fa8,#0b3d7a)",
+      border:"2px solid #378ADD",boxShadow:"0 2px 8px rgba(0,0,0,0.4)",opacity:undefined}}>
+      <span style={{fontSize:fs+4,color:"#7ab8f5"}}>🂠</span>
+    </div>
+  );
+  return(
+    <div className={animClass||""} style={{...base,background:"#fff",border:"1.5px solid #ccc",
+      boxShadow:"0 3px 10px rgba(0,0,0,0.3)",opacity:undefined}}>
+      <span style={{color:cClr(card.suit),fontSize:fs,fontWeight:700,lineHeight:1}}>{card.rank}</span>
+      <span style={{color:cClr(card.suit),fontSize:fs+3,lineHeight:1}}>{card.suit}</span>
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════
+// ── Chat Panel ──
+// ════════════════════════════════════════════════════
+function ChatPanel({chat,onSend,playerName}){
+  const [msg,setMsg]=useState("");
+  const ref=useRef();
+  useEffect(()=>{if(ref.current)ref.current.scrollTop=ref.current.scrollHeight;},[chat]);
+  function send(){if(!msg.trim())return;onSend(playerName,msg.trim());setMsg("");}
+  return(
+    <div style={{width:270,minWidth:270,background:"#070d1c",borderLeft:"1px solid #1a2e4a",
+      display:"flex",flexDirection:"column",height:"100vh",position:"sticky",top:0}}>
+      <div style={{padding:"12px 16px",borderBottom:"1px solid #1a2e4a",display:"flex",alignItems:"center",gap:8}}>
+        <span style={{fontSize:15}}>💬</span>
+        <span style={{color:"#FAC775",fontSize:12,fontWeight:700,letterSpacing:2}}>TABLE CHAT</span>
+      </div>
+      <div ref={ref} style={{flex:1,overflowY:"auto",padding:"10px 12px",display:"flex",flexDirection:"column",gap:7}}>
+        {chat.map((m,i)=>(
+          <div key={i} className="slide-in" style={{lineHeight:1.5}}>
+            <span style={{color:m.name==="System"?"#0F6E56":m.name===playerName?"#FAC775":"#378ADD",
+              fontSize:11,fontWeight:700}}>{m.name}: </span>
+            <span style={{color:"#b0b8cc",fontSize:12}}>{m.text}</span>
+          </div>
+        ))}
+        {chat.length===0&&<p style={{color:"#2a3a50",fontSize:11,textAlign:"center",marginTop:24}}>No messages yet</p>}
+      </div>
+      <div style={{padding:"8px 10px",borderTop:"1px solid #1a2e4a",display:"flex",gap:6}}>
+        <input value={msg} onChange={e=>setMsg(e.target.value)} onKeyDown={e=>e.key==="Enter"&&send()}
+          placeholder="Say something..." style={{flex:1,padding:"7px 10px",borderRadius:6,
+          border:"1px solid #1a2e4a",background:"#0d1829",color:"#fff",fontSize:12}}/>
+        <button onClick={send} style={{padding:"7px 12px",borderRadius:6,border:"none",
+          background:"#185FA5",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:700}}>↑</button>
+      </div>
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════
+// ── Player Seat ──
+// ════════════════════════════════════════════════════
+function PlayerSeat({p,isActive,community,showCards,dealing,dealIdx}){
+  const hand=getBestHand(p.hole||[],community);
+  const d=p.isBot&&p.difficulty?DIFF[p.difficulty]:null;
+  const [cardsReady,setCardsReady]=useState(false);
+  useEffect(()=>{
+    if(dealing){setCardsReady(false);const t=setTimeout(()=>setCardsReady(true),(dealIdx||0)*280+600);return()=>clearTimeout(t);}
+    else setCardsReady(true);
+  },[dealing,dealIdx]);
+  return(
+    <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:3,
+      opacity:p.folded?0.4:1,minWidth:85,maxWidth:105,transition:"opacity 0.4s"}}>
+      <div style={{width:40,height:40,borderRadius:"50%",
+        background:isActive?"#FAC775":"#111e35",
+        border:`3px solid ${isActive?"#FAC775":"#1a2e4a"}`,
+        display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,
+        boxShadow:isActive?"0 0 16px rgba(250,199,117,0.5)":"none",
+        transition:"all 0.35s",animation:isActive?"chipPulse 2s infinite":"none"}}>
+        {p.avatar}
+      </div>
+      <span style={{fontSize:10,color:isActive?"#FAC775":"#bbc4d6",maxWidth:82,
+        overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",textAlign:"center",
+        transition:"color 0.3s"}}>{p.name}</span>
+      {d&&<span style={{fontSize:9,fontWeight:700,color:d.color,background:d.bg,
+        padding:"1px 5px",borderRadius:4,border:`1px solid ${d.color}55`,letterSpacing:0.5}}>{d.label}</span>}
+      <span style={{fontSize:10,color:"#7ee8c8",fontWeight:700}}>${p.chips}</span>
+      <div style={{display:"flex",gap:3}}>
+        {showCards&&p.hole&&cardsReady
+          ?p.hole.map((c,i)=><Card key={i} card={c} small animClass="flip-anim" animDelay={`${i*0.12}s`}/>)
+          :<>
+            <Card hidden small animClass={dealing&&!cardsReady?"deal-anim":undefined} animDelay="0s"/>
+            <Card hidden small animClass={dealing&&!cardsReady?"deal-anim":undefined} animDelay="0.15s"/>
+          </>
+        }
+      </div>
+      {p.folded&&<span style={{fontSize:9,color:"#c0392b",fontStyle:"italic"}}>Folded</span>}
+      {!p.folded&&showCards&&cardsReady&&<span style={{fontSize:9,color:"#FAC775"}}>{hand.name}</span>}
+      {p.bet>0&&!p.folded&&(
+        <div style={{background:"rgba(250,199,117,0.15)",border:"1px solid #FAC77566",
+          borderRadius:10,padding:"1px 8px",fontSize:9,color:"#FAC775",fontWeight:700}}>
+          Bet ${p.bet}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════
+// ── Game Table ──
+// ════════════════════════════════════════════════════
+function GameTable({room,humanPlayer,chat,onChat}){
+  const [game,setGame]=useState(()=>({...initGame(room),dealing:true}));
+  const [raiseAmt,setRaiseAmt]=useState(20);
+  const [sdDone,setSdDone]=useState(false);
+  const [prevComLen,setPrevComLen]=useState(0);
+  const [comAnimKeys,setComAnimKeys]=useState([]);
+  const botRef=useRef(null);
+
+  const myIdx=game.players.findIndex(p=>p.id===humanPlayer.id);
+  const me=game.players[myIdx];
+  const isMyTurn=game.activeIdx===myIdx&&!["done","showdown"].includes(game.stage);
+
+  // Clear deal animation after 2s
+  useEffect(()=>{
+    if(game.dealing){
+      const t=setTimeout(()=>setGame(g=>({...g,dealing:false})),2000);
+      return()=>clearTimeout(t);
+    }
+  },[game.dealing]);
+
+  // Community card animation keys
+  useEffect(()=>{
+    if(game.community.length>prevComLen){
+      const newKeys=game.community.map((_,i)=>i>=prevComLen?Date.now()+i:0);
+      setComAnimKeys(newKeys);
+      setPrevComLen(game.community.length);
+    }
+  },[game.community.length]);
+
+  // Showdown -> pick winner
+  useEffect(()=>{
+    if(game.stage==="showdown"&&!sdDone){
+      setSdDone(true);
+      setTimeout(()=>setGame(g=>pickWinner(g)),1200);
+    }
+  },[game.stage,sdDone]);
+
+  // Bot turns — single clean effect, no cascading
+  useEffect(()=>{
+    if(botRef.current){clearTimeout(botRef.current);botRef.current=null;}
+    if(["done","showdown"].includes(game.stage))return;
+    const cur=game.players[game.activeIdx];
+    if(!cur||!cur.isBot||cur.folded||game.dealing)return;
+    const d=DIFF[cur.difficulty||"easy"];
+    const delay=d.tMin+Math.random()*(d.tMax-d.tMin);
+    botRef.current=setTimeout(()=>{
+      setGame(g=>{
+        const bot=g.players[g.activeIdx];
+        if(!bot||!bot.isBot||bot.folded)return g;
+        const action=botDecide(bot,g);
+        const amt=g.bb*(DIFF[bot.difficulty||"easy"].rMul);
+        return applyAction(g,g.activeIdx,action,amt);
+      });
+    },delay);
+    return()=>{if(botRef.current){clearTimeout(botRef.current);botRef.current=null;}};
+  },[game.activeIdx,game.stage,game.dealing]);
+
+  function doAction(action){
+    if(!isMyTurn)return;
+    setGame(g=>applyAction(g,myIdx,action,raiseAmt));
+  }
+
+  function nextHand(){
+    // Carry chips over
+    const updatedPlayers=game.players.map(p=>{
+      const base=room.players.find(rp=>rp.id===p.id)||{};
+      return{...base,id:p.id,name:p.name,avatar:p.avatar,isBot:p.isBot,difficulty:p.difficulty,
+        chips:game.winner?.id===p.id?p.chips+game.pot:p.chips};
+    });
+    const updRoom={...room,players:updatedPlayers};
+    setGame({...initGame(updRoom),dealing:true});
+    setSdDone(false);
+    setPrevComLen(0);
+    setComAnimKeys([]);
+  }
+
+  const isDone=game.stage==="done";
+  const others=game.players.filter((_,i)=>i!==myIdx);
+
+  const btn=(bg,dis)=>({padding:"9px 14px",borderRadius:8,border:"none",
+    background:dis?"#0f1e30":bg,color:dis?"#334":  "#fff",fontSize:12,fontWeight:700,
+    cursor:dis?"not-allowed":"pointer",whiteSpace:"nowrap",opacity:dis?0.4:1,
+    transition:"all 0.2s",fontFamily:"Georgia,serif"});
+
+  return(
+    <div style={{display:"flex",height:"100vh",overflow:"hidden",background:"#05101e"}}>
+      <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden",minWidth:0}}>
+
+        {/* ── Top bar ── */}
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",
+          padding:"8px 18px",background:"#070d1c",borderBottom:"1px solid #1a2e4a",flexShrink:0}}>
+          <span style={{color:"#FAC775",fontWeight:700,fontSize:18,letterSpacing:3}}>♠ HOLD'EM</span>
+          <div style={{display:"flex",gap:8,alignItems:"center"}}>
+            <span style={{color:"#555",fontSize:11}}>Room</span>
+            <span style={{color:"#FAC775",fontFamily:"monospace",fontWeight:700,
+              letterSpacing:4,fontSize:15,background:"#0a1628",padding:"2px 10px",borderRadius:6,
+              border:"1px solid #1a2e4a"}}>{room.code}</span>
+            <span style={{background:isDone?"#185FA5":"#0a4a35",color:isDone?"#9FC8F5":"#7ee8c8",
+              fontSize:10,padding:"3px 10px",borderRadius:10,textTransform:"uppercase",
+              letterSpacing:1,border:`1px solid ${isDone?"#185FA5":"#0F6E56"}`}}>{game.stage}</span>
+          </div>
+          <div style={{display:"flex",alignItems:"center",gap:6}}>
+            <span style={{color:"#555",fontSize:11}}>POT</span>
+            <span style={{color:"#FAC775",fontSize:18,fontWeight:700,
+              textShadow:"0 0 20px rgba(250,199,117,0.4)"}}>${game.pot}</span>
+          </div>
+        </div>
+
+        {/* ── Felt table ── */}
+        <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",
+          background:"#05101e",padding:"12px",overflow:"hidden"}}>
+          <div style={{width:"100%",maxWidth:860,height:"100%",maxHeight:440,position:"relative",
+            background:"radial-gradient(ellipse at center,#0e6b52 0%,#07503c 55%,#033328 100%)",
+            borderRadius:"50%",border:"10px solid #1a1008",
+            boxShadow:"inset 0 0 80px rgba(0,0,0,0.6),0 12px 60px rgba(0,0,0,0.9)",
+            display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:10}}>
+
+            {/* Opponent seats */}
+            <div style={{position:"absolute",top:14,left:0,right:0,
+              display:"flex",justifyContent:"space-around",padding:"0 50px"}}>
+              {others.map((p,i)=>(
+                <PlayerSeat key={p.id} p={p}
+                  isActive={game.players[game.activeIdx]?.id===p.id}
+                  community={game.community}
+                  showCards={isDone||game.stage==="showdown"}
+                  dealing={game.dealing}
+                  dealIdx={i+1}/>
+              ))}
+            </div>
+
+            {/* Community cards */}
+            <div style={{display:"flex",gap:8,flexWrap:"nowrap",justifyContent:"center"}}>
+              {game.community.map((c,i)=>(
+                <Card key={`com-${i}-${comAnimKeys[i]||0}`} card={c}
+                  animClass={comAnimKeys[i]?"community-anim":undefined}
+                  animDelay={comAnimKeys[i]?`${(i-prevComLen+game.community.length-1)*0.15}s`:"0s"}/>
+              ))}
+              {Array.from({length:5-game.community.length}).map((_,i)=>(
+                <Card key={`ph-${i}`} hidden/>
+              ))}
+            </div>
+
+            {/* Pot chip */}
+            <div style={{background:"rgba(0,0,0,0.5)",borderRadius:20,padding:"4px 18px",
+              border:"1px solid rgba(250,199,117,0.2)"}}>
+              <span style={{color:"#FAC775",fontSize:12,fontWeight:700,letterSpacing:2}}>
+                💰 ${game.pot}
+              </span>
+            </div>
+
+            {/* Winner overlay */}
+            {isDone&&game.winner&&(
+              <div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",
+                justifyContent:"center",background:"rgba(0,0,0,0.75)",
+                borderRadius:"calc(50% - 5px)",zIndex:20}} className="fade-in">
+                <div style={{textAlign:"center",background:"#080f1e",borderRadius:18,
+                  padding:"1.5rem 2.5rem",border:"2px solid #FAC775",
+                  animation:"winGlow 1.5s ease-in-out infinite"}}>
+                  <div style={{fontSize:40,marginBottom:8}}>🏆</div>
+                  <p style={{color:"#FAC775",fontSize:22,fontWeight:700,margin:0}}>
+                    {game.winner.name} Wins!
+                  </p>
+                  <p style={{color:"#7ee8c8",fontSize:14,margin:"5px 0 0"}}>${game.pot} pot</p>
+                  <p style={{color:"#888",fontSize:12,margin:"3px 0 0"}}>
+                    {getBestHand(game.winner.hole||[],game.community).name}
+                  </p>
+                  <button onClick={nextHand} style={{marginTop:14,padding:"10px 28px",
+                    borderRadius:10,border:"none",
+                    background:"linear-gradient(135deg,#185FA5,#0C447C)",
+                    color:"#fff",fontSize:14,fontWeight:700,cursor:"pointer",
+                    fontFamily:"Georgia,serif",letterSpacing:1}}>
+                    Next Hand ▶
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* ── My hand + controls ── */}
+        <div style={{background:"#070d1c",borderTop:"1px solid #1a2e4a",
+          padding:"10px 18px",display:"flex",alignItems:"center",gap:14,flexShrink:0}}>
+          <div>
+            <p style={{color:"#334",fontSize:9,letterSpacing:2,margin:"0 0 5px"}}>YOUR HAND</p>
+            <div style={{display:"flex",gap:8}}>
+              {me?.hole?.map((c,i)=>(
+                <Card key={i} card={me.folded?null:c}
+                  animClass={game.dealing?"deal-anim":undefined}
+                  animDelay={`${i*0.2}s`}/>
+              ))||<><Card hidden/><Card hidden/></>}
+            </div>
+          </div>
+          <div style={{flex:1,minWidth:0}}>
+            {me&&!me.folded&&(
+              <p style={{color:"#9FC8F5",fontSize:11,margin:"0 0 2px",
+                fontStyle:"italic",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                {getBestHand(me.hole,game.community).name}
+              </p>
+            )}
+            <p style={{color:"#FAC775",fontSize:16,fontWeight:700,margin:"0 0 1px"}}>
+              ${me?.chips||0}
+            </p>
+            {me?.bet>0&&<p style={{color:"#7ee8c8",fontSize:11,margin:0}}>Bet ${me.bet}</p>}
+            {me?.folded&&<p style={{color:"#c0392b",fontSize:11,margin:0,fontStyle:"italic"}}>You folded</p>}
+          </div>
+
+          {/* Action buttons */}
+          {!isDone&&isMyTurn&&!me?.folded&&(
+            <div style={{display:"flex",gap:7,alignItems:"center",flexWrap:"wrap",justifyContent:"flex-end"}}>
+              {game.currentBet===me.bet
+                ?<button onClick={()=>doAction("check")} style={btn("#0d6b47")}>✓ Check</button>
+                :<button onClick={()=>doAction("call")} style={btn("#185FA5")}>= Call ${game.currentBet-me.bet}</button>
+              }
+              <div style={{display:"flex",gap:5,alignItems:"center",
+                background:"#0a1628",borderRadius:8,padding:"5px 9px",border:"1px solid #1a2e4a"}}>
+                <span style={{color:"#556",fontSize:10}}>$</span>
+                <input type="range"
+                  min={game.bb} max={Math.max(game.bb,me?.chips||game.bb)}
+                  step={game.bb} value={raiseAmt}
+                  onChange={e=>setRaiseAmt(+e.target.value)}
+                  style={{width:70}}/>
+                <button onClick={()=>doAction("raise")} style={btn("#8a5a00")}>↑ ${raiseAmt}</button>
+              </div>
+              <button onClick={()=>doAction("fold")} style={btn("#7a1e1e")}>✕ Fold</button>
+            </div>
+          )}
+          {!isDone&&!isMyTurn&&(
+            <p style={{color:"#334",fontSize:12,fontStyle:"italic"}}>
+              {me?.folded?"Folded this hand":"Waiting..."}
+            </p>
+          )}
+        </div>
+
+        {/* ── Action log ticker ── */}
+        <div style={{background:"#040a12",padding:"5px 18px",borderTop:"1px solid #0d1829",
+          display:"flex",gap:16,alignItems:"center",overflow:"hidden",flexShrink:0,minHeight:28}}>
+          {game.log.slice(-6).map((l,i,arr)=>(
+            <span key={i} style={{color:`rgba(80,110,150,${0.3+i*(0.7/arr.length)})`,
+              fontSize:10,whiteSpace:"nowrap"}}>{l}</span>
+          ))}
+        </div>
+      </div>
+
+      <ChatPanel chat={chat} onSend={onChat} playerName={humanPlayer.name}/>
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════
+// ── Waiting Room ──
+// ════════════════════════════════════════════════════
+function WaitingRoom({room,player,onAddBot,onStart,chat,onChat}){
+  const isHost=player.id===room.hostId;
+  const canAdd=room.players.length<6;
+  const canStart=room.players.length>=2;
+  const [botDiff,setBotDiff]=useState("easy");
+  const [liveRoom,setLiveRoom]=useState(room);
+
+  // Poll the shared ROOMS store so joinees appear in real time
+  useEffect(()=>{
+    const iv=setInterval(()=>{
+      const r=ROOMS[room.code];
+      if(r)setLiveRoom({...r});
+    },500);
+    return()=>clearInterval(iv);
+  },[room.code]);
+
+  return(
+    <div style={{minHeight:"100vh",background:"#08111e",display:"flex",fontFamily:"Georgia,serif",color:"#fff"}}>
+      <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",padding:"2rem"}}>
+        <div style={{background:"#0d1829",borderRadius:20,border:"1px solid #1a2e4a",
+          padding:"2.5rem",width:"100%",maxWidth:460,boxShadow:"0 20px 60px rgba(0,0,0,0.6)"}}>
+
+          <h2 style={{color:"#FAC775",margin:"0 0 4px",fontSize:22,textAlign:"center",letterSpacing:2}}>
+            Waiting Room
+          </h2>
+          <p style={{color:"#445",fontSize:12,textAlign:"center",margin:"0 0 22px"}}>
+            Share the code — others open this file and join!
+          </p>
+
+          {/* Room code display */}
+          <div style={{textAlign:"center",marginBottom:24}}>
+            <div style={{display:"inline-block",background:"#05101e",borderRadius:12,
+              padding:"10px 28px",border:"1px solid #1a2e4a"}}>
+              <span style={{color:"#FAC775",fontFamily:"monospace",fontSize:30,
+                fontWeight:700,letterSpacing:10}}>{room.code}</span>
+            </div>
+            <p style={{color:"#334",fontSize:11,margin:"6px 0 0"}}>
+              Others open this .html file → Join Game → enter this code
+            </p>
+          </div>
+
+          {/* Player list (live) */}
+          <p style={{color:"#556",fontSize:11,margin:"0 0 8px",letterSpacing:1}}>
+            PLAYERS ({liveRoom.players.length}/6)
+          </p>
+          <div style={{display:"flex",flexDirection:"column",gap:5,marginBottom:20}}>
+            {liveRoom.players.map(p=>{
+              const d=p.isBot&&p.difficulty?DIFF[p.difficulty]:null;
+              return(
+                <div key={p.id} className="slide-in" style={{display:"flex",alignItems:"center",gap:10,
+                  padding:"9px 13px",background:"#05101e",borderRadius:10,
+                  border:`1px solid ${p.id===room.hostId?"#185FA5":"#1a2e4a"}`}}>
+                  <span style={{fontSize:22}}>{p.avatar}</span>
+                  <span style={{flex:1,fontSize:14}}>{p.name}</span>
+                  {d&&<span style={{fontSize:9,fontWeight:700,color:d.color,background:d.bg,
+                    padding:"2px 7px",borderRadius:5,border:`1px solid ${d.color}55`}}>{d.label}</span>}
+                  {p.isBot&&<span style={{color:"#445",fontSize:10,background:"#1a2e4a",
+                    padding:"2px 8px",borderRadius:5}}>BOT</span>}
+                  {p.id===room.hostId&&<span style={{color:"#FAC775",fontSize:10,fontWeight:700}}>HOST</span>}
+                </div>
+              );
+            })}
+          </div>
+
+          {isHost&&(
+            <>
+              {canAdd&&(
+                <div style={{marginBottom:12}}>
+                  <p style={{color:"#556",fontSize:10,letterSpacing:1,margin:"0 0 7px"}}>BOT DIFFICULTY</p>
+                  <div style={{display:"flex",gap:6,marginBottom:8}}>
+                    {Object.entries(DIFF).map(([k,d])=>(
+                      <button key={k} onClick={()=>setBotDiff(k)}
+                        style={{flex:1,padding:"7px 4px",borderRadius:8,
+                          border:`2px solid ${botDiff===k?d.color:"#1a2e4a"}`,
+                          background:botDiff===k?d.bg:"#05101e",
+                          color:botDiff===k?d.color:"#556",fontSize:11,fontWeight:700,
+                          cursor:"pointer",fontFamily:"Georgia,serif",transition:"all 0.2s"}}>
+                        {d.label}
+                      </button>
+                    ))}
+                  </div>
+                  <div style={{background:"#05101e",borderRadius:8,padding:"7px 11px",
+                    border:"1px solid #1a2e4a",marginBottom:10}}>
+                    {botDiff==="easy"&&<p style={{color:"#667",fontSize:11,margin:0}}>🟢 <strong style={{color:"#1D9E75"}}>Easy</strong> — Folds a lot, barely bluffs. Great to learn against.</p>}
+                    {botDiff==="hard"&&<p style={{color:"#667",fontSize:11,margin:0}}>🟡 <strong style={{color:"#FAC775"}}>Hard</strong> — Reads hands, occasional bluffs. A real test.</p>}
+                    {botDiff==="difficult"&&<p style={{color:"#667",fontSize:11,margin:0}}>🔴 <strong style={{color:"#e24b4a"}}>Difficult</strong> — Aggressive, strategic, frequent bluffs. Good luck.</p>}
+                  </div>
+                </div>
+              )}
+              <div style={{display:"flex",gap:8}}>
+                {canAdd&&(
+                  <button onClick={()=>onAddBot(botDiff)}
+                    style={{flex:1,padding:"11px",borderRadius:10,border:"1px solid #1a2e4a",
+                    background:"#05101e",color:"#7ee8c8",fontSize:13,cursor:"pointer",
+                    fontFamily:"Georgia,serif",transition:"background 0.2s"}}>
+                    🤖 Add Bot
+                  </button>
+                )}
+                <button onClick={onStart} disabled={!canStart}
+                  style={{flex:2,padding:"11px",borderRadius:10,border:"none",
+                  background:canStart?"linear-gradient(135deg,#1D9E75,#0F6E56)":"#1a2e4a",
+                  color:canStart?"#fff":"#445",fontSize:14,fontWeight:700,
+                  cursor:canStart?"pointer":"not-allowed",fontFamily:"Georgia,serif"}}>
+                  {canStart?"▶ Start Game":"Need 2+ Players"}
+                </button>
+              </div>
+            </>
+          )}
+          {!isHost&&(
+            <p style={{color:"#445",textAlign:"center",fontSize:13,fontStyle:"italic"}}>
+              Waiting for the host to start...
+            </p>
+          )}
+        </div>
+      </div>
+      <ChatPanel chat={chat} onSend={onChat} playerName={player.name}/>
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════
+// ── Tutorial ──
+// ════════════════════════════════════════════════════
+function MiniCard({rank,suit,tiny}){
+  const isR=suit==="♥"||suit==="♦";
+  const w=tiny?22:32,h=tiny?30:44,fs=tiny?7:10;
+  return(
+    <div style={{width:w,height:h,borderRadius:4,background:"#fff",border:"1px solid #ccc",
+      display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",
+      flexShrink:0,boxShadow:"0 1px 4px rgba(0,0,0,0.3)"}}>
+      <span style={{color:isR?"#e24b4a":"#111",fontSize:fs,fontWeight:700,lineHeight:1}}>{rank}</span>
+      <span style={{color:isR?"#e24b4a":"#111",fontSize:fs+2,lineHeight:1}}>{suit}</span>
+    </div>
+  );
+}
+
+const TSTEPS=[
+  {title:"Welcome to Texas Hold'em! 🃏",icon:"🂡",color:"#FAC775",
+   content:"The world's most popular poker game. Make the best 5-card hand using your 2 private hole cards and up to 5 shared community cards — and win the pot!",
+   visual:()=>(
+    <div style={{display:"flex",flexWrap:"wrap",gap:8,alignItems:"center",justifyContent:"center",margin:"16px 0"}}>
+      <div style={{textAlign:"center"}}>
+        <p style={{color:"#556",fontSize:9,margin:"0 0 5px",letterSpacing:1}}>YOUR CARDS</p>
+        <div style={{display:"flex",gap:4}}><MiniCard rank="A" suit="♠"/><MiniCard rank="K" suit="♠"/></div>
+      </div>
+      <span style={{color:"#334",fontSize:18}}>+</span>
+      <div style={{textAlign:"center"}}>
+        <p style={{color:"#556",fontSize:9,margin:"0 0 5px",letterSpacing:1}}>COMMUNITY</p>
+        <div style={{display:"flex",gap:4}}>
+          <MiniCard rank="Q" suit="♠"/><MiniCard rank="J" suit="♠"/><MiniCard rank="10" suit="♠"/>
+        </div>
+      </div>
+      <span style={{color:"#334",fontSize:18}}>=</span>
+      <div style={{textAlign:"center"}}>
+        <p style={{color:"#FAC775",fontSize:9,margin:"0 0 5px",letterSpacing:1}}>ROYAL FLUSH! 🏆</p>
+        <div style={{display:"flex",gap:3}}>
+          <MiniCard rank="A" suit="♠"/><MiniCard rank="K" suit="♠"/><MiniCard rank="Q" suit="♠"/>
+          <MiniCard rank="J" suit="♠"/><MiniCard rank="10" suit="♠"/>
+        </div>
+      </div>
+    </div>
+   )},
+  {title:"Blinds & The Table 🪙",icon:"🎰",color:"#9FE1CB",
+   content:"Two players must post forced bets (blinds) before cards are dealt. The Small Blind ($5) sits left of the dealer, the Big Blind ($10) next. This seeds the pot and starts the action!",
+   visual:()=>(
+    <div style={{display:"flex",justifyContent:"center",gap:20,margin:"16px 0"}}>
+      {[{n:"Dealer",b:"🎯",c:"#185FA5"},{n:"Small Blind",b:"$5",c:"#1D9E75"},{n:"Big Blind",b:"$10",c:"#FAC775"}].map((p,i)=>(
+        <div key={i} style={{display:"flex",flexDirection:"column",alignItems:"center",gap:4}}>
+          <span style={{fontSize:24}}>🧑</span>
+          <span style={{fontSize:11,color:"#aaa"}}>{p.n}</span>
+          <div style={{background:p.c,borderRadius:12,padding:"2px 10px",fontSize:11,color:"#fff",fontWeight:700}}>{p.b}</div>
+        </div>
+      ))}
+    </div>
+   )},
+  {title:"The 4 Betting Rounds 🔄",icon:"🔄",color:"#378ADD",
+   content:"Each hand has 4 rounds of betting. More community cards are revealed each round. You bet, check, call, raise or fold at every stage.",
+   visual:()=>(
+    <div style={{display:"flex",flexDirection:"column",gap:6,margin:"14px 0"}}>
+      {[
+        {s:"PRE-FLOP",d:"Bet with only your 2 hole cards.",cs:[]},
+        {s:"FLOP",d:"3 community cards revealed.",cs:[{r:"7",s:"♥"},{r:"8",s:"♦"},{r:"9",s:"♣"}]},
+        {s:"TURN",d:"4th card revealed.",cs:[{r:"7",s:"♥"},{r:"8",s:"♦"},{r:"9",s:"♣"},{r:"10",s:"♠"}]},
+        {s:"RIVER",d:"Final 5th card revealed.",cs:[{r:"7",s:"♥"},{r:"8",s:"♦"},{r:"9",s:"♣"},{r:"10",s:"♠"},{r:"J",s:"♥"}]},
+      ].map((row,i)=>(
+        <div key={i} style={{display:"flex",alignItems:"center",gap:8,background:"#05101e",
+          borderRadius:8,padding:"7px 10px",border:"1px solid #1a2e4a"}}>
+          <span style={{color:"#FAC775",fontSize:9,fontWeight:700,minWidth:60,letterSpacing:1}}>{row.s}</span>
+          <div style={{display:"flex",gap:3,flex:1}}>
+            {row.cs.map((c,j)=><MiniCard key={j} rank={c.r} suit={c.s}/>)}
+            {row.cs.length===0&&<span style={{color:"#334",fontSize:10,fontStyle:"italic"}}>No community cards</span>}
+          </div>
+          <span style={{color:"#556",fontSize:10,maxWidth:130,textAlign:"right"}}>{row.d}</span>
+        </div>
+      ))}
+    </div>
+   )},
+  {title:"Your Actions 🎮",icon:"🎮",color:"#BA7517",
+   content:"Each turn you choose one action. Great players know when to be bold and when to walk away!",
+   visual:()=>(
+    <div style={{display:"flex",flexDirection:"column",gap:7,margin:"14px 0"}}>
+      {[
+        {a:"FOLD",c:"#7a1e1e",i:"✕",d:"Give up your cards. You lose whatever you've bet."},
+        {a:"CHECK",c:"#0d3050",i:"✓",d:"Pass without betting. Only when nobody has raised."},
+        {a:"CALL", c:"#185FA5",i:"=",d:"Match the current bet to stay in the hand."},
+        {a:"RAISE",c:"#8a5a00",i:"↑",d:"Increase the bet — others must match or fold."},
+      ].map((x,i)=>(
+        <div key={i} style={{display:"flex",alignItems:"center",gap:10,background:"#05101e",
+          borderRadius:8,padding:"8px 11px",border:`1px solid ${x.c}44`}}>
+          <div style={{width:30,height:30,borderRadius:7,background:x.c,display:"flex",
+            alignItems:"center",justifyContent:"center",fontSize:14,color:"#fff",fontWeight:700,flexShrink:0}}>{x.i}</div>
+          <span style={{color:"#FAC775",fontSize:12,fontWeight:700,minWidth:46}}>{x.a}</span>
+          <span style={{color:"#667",fontSize:11}}>{x.d}</span>
+        </div>
+      ))}
+    </div>
+   )},
+  {title:"Hand Rankings 🏆",icon:"🏆",color:"#FAC775",
+   content:"The best 5-card hand wins the pot! Ranked strongest → weakest:",
+   visual:()=>(
+    <div style={{display:"flex",flexDirection:"column",gap:4,margin:"10px 0"}}>
+      {[
+        {n:"Royal Flush",  cs:[{r:"A",s:"♠"},{r:"K",s:"♠"},{r:"Q",s:"♠"},{r:"J",s:"♠"},{r:"10",s:"♠"}],c:"#FAC775"},
+        {n:"Straight Flush",cs:[{r:"9",s:"♥"},{r:"8",s:"♥"},{r:"7",s:"♥"},{r:"6",s:"♥"},{r:"5",s:"♥"}],c:"#e24b4a"},
+        {n:"Four of a Kind",cs:[{r:"K",s:"♠"},{r:"K",s:"♥"},{r:"K",s:"♦"},{r:"K",s:"♣"},{r:"A",s:"♠"}],c:"#c77dff"},
+        {n:"Full House",   cs:[{r:"Q",s:"♠"},{r:"Q",s:"♥"},{r:"Q",s:"♦"},{r:"J",s:"♠"},{r:"J",s:"♥"}],c:"#378ADD"},
+        {n:"Flush",        cs:[{r:"A",s:"♦"},{r:"J",s:"♦"},{r:"8",s:"♦"},{r:"5",s:"♦"},{r:"2",s:"♦"}],c:"#e24b4a"},
+        {n:"Straight",     cs:[{r:"8",s:"♠"},{r:"7",s:"♥"},{r:"6",s:"♦"},{r:"5",s:"♣"},{r:"4",s:"♠"}],c:"#1D9E75"},
+        {n:"Three of a Kind",cs:[{r:"7",s:"♠"},{r:"7",s:"♥"},{r:"7",s:"♦"},{r:"K",s:"♠"},{r:"2",s:"♣"}],c:"#9FE1CB"},
+        {n:"Two Pair",     cs:[{r:"J",s:"♠"},{r:"J",s:"♥"},{r:"8",s:"♦"},{r:"8",s:"♣"},{r:"A",s:"♠"}],c:"#888"},
+        {n:"Pair",         cs:[{r:"A",s:"♠"},{r:"A",s:"♥"},{r:"K",s:"♦"},{r:"Q",s:"♣"},{r:"J",s:"♠"}],c:"#667"},
+        {n:"High Card",    cs:[{r:"A",s:"♠"},{r:"K",s:"♥"},{r:"J",s:"♦"},{r:"8",s:"♣"},{r:"3",s:"♠"}],c:"#445"},
+      ].map((h,i)=>(
+        <div key={i} style={{display:"flex",alignItems:"center",gap:7,padding:"4px 9px",
+          background:"#05101e",borderRadius:6,border:`1px solid ${h.c}33`}}>
+          <span style={{color:h.c,fontSize:10,fontWeight:700,minWidth:108}}>{i+1}. {h.n}</span>
+          <div style={{display:"flex",gap:2}}>
+            {h.cs.map((c,j)=><MiniCard key={j} rank={c.r} suit={c.s} tiny/>)}
+          </div>
+        </div>
+      ))}
+    </div>
+   )},
+  {title:"Tips & Strategy 💡",icon:"💡",color:"#9FE1CB",
+   content:"You're ready to play! A few tips to keep in mind:",
+   visual:()=>(
+    <div style={{display:"flex",flexDirection:"column",gap:7,margin:"14px 0"}}>
+      {[
+        {i:"🃏",t:"Start strong","d":"Pairs, high cards (A/K/Q), and suited connectors are solid starting hands."},
+        {i:"👀",t:"Watch bets",  d:"Big raises usually mean big hands — or big bluffs. Pay attention."},
+        {i:"💰",t:"Protect chips",d:"Don't go all-in early. Wait for a strong hand to make your move."},
+        {i:"🎭",t:"Bluff rarely", d:"Beginners get caught bluffing far more than they think."},
+        {i:"🧘",t:"Be patient",  d:"Folding is often the best play. You don't have to play every hand."},
+      ].map((t,i)=>(
+        <div key={i} style={{display:"flex",gap:10,background:"#05101e",borderRadius:8,
+          padding:"8px 11px",border:"1px solid #1a2e4a"}}>
+          <span style={{fontSize:18,flexShrink:0}}>{t.i}</span>
+          <div>
+            <p style={{color:"#9FE1CB",fontSize:11,fontWeight:700,margin:"0 0 1px"}}>{t.t}</p>
+            <p style={{color:"#556",fontSize:11,margin:0,lineHeight:1.5}}>{t.d}</p>
+          </div>
+        </div>
+      ))}
+    </div>
+   )},
+];
+
+function TutorialScreen({onBack}){
+  const [step,setStep]=useState(0);
+  const s=TSTEPS[step];
+  const isLast=step===TSTEPS.length-1;
+  return(
+    <div style={{minHeight:"100vh",background:"radial-gradient(ellipse at 50% 20%,#0d1e33,#05101e)",
+      display:"flex",alignItems:"center",justifyContent:"center",
+      fontFamily:"Georgia,serif",padding:"1rem"}}>
+      <div style={{width:"100%",maxWidth:600,background:"#0d1829",borderRadius:20,
+        border:`1px solid ${s.color}44`,
+        boxShadow:`0 30px 80px rgba(0,0,0,0.8),0 0 40px ${s.color}0d`}}>
+
+        {/* Header */}
+        <div style={{padding:"12px 18px",borderBottom:"1px solid #1a2e4a",
+          display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+          <button onClick={onBack} style={{background:"none",border:"1px solid #1a2e4a",
+            color:"#667",borderRadius:8,padding:"5px 12px",cursor:"pointer",
+            fontSize:12,fontFamily:"Georgia,serif"}}>← Back</button>
+          <span style={{color:"#FAC775",fontSize:12,fontWeight:700,letterSpacing:2}}>HOW TO PLAY</span>
+          <span style={{color:"#334",fontSize:11}}>{step+1}/{TSTEPS.length}</span>
+        </div>
+
+        {/* Progress */}
+        <div style={{height:3,background:"#1a2e4a"}}>
+          <div style={{height:"100%",background:`linear-gradient(90deg,${s.color},${s.color}88)`,
+            width:`${((step+1)/TSTEPS.length)*100}%`,transition:"width 0.4s ease"}}/>
+        </div>
+
+        {/* Dots */}
+        <div style={{display:"flex",justifyContent:"center",gap:7,padding:"12px 0 0"}}>
+          {TSTEPS.map((_,i)=>(
+            <div key={i} onClick={()=>setStep(i)}
+              style={{width:i===step?22:7,height:7,borderRadius:4,
+                background:i===step?s.color:i<step?"#1a2e4a":"#0a1020",
+                border:`1px solid ${i===step?s.color:"#1a2e4a"}`,
+                cursor:"pointer",transition:"all 0.3s"}}/>
+          ))}
+        </div>
+
+        {/* Content */}
+        <div style={{padding:"14px 20px",overflowY:"auto",maxHeight:"60vh"}}>
+          <div style={{textAlign:"center",marginBottom:12}}>
+            <div style={{fontSize:40,marginBottom:6}}>{s.icon}</div>
+            <h2 style={{color:s.color,fontSize:18,margin:0,letterSpacing:1}}>{s.title}</h2>
+          </div>
+          <p style={{color:"#8899aa",fontSize:13,lineHeight:1.7,textAlign:"center",margin:"0 0 4px"}}>{s.content}</p>
+          {s.visual&&<s.visual/>}
+        </div>
+
+        {/* Nav */}
+        <div style={{padding:"12px 20px",borderTop:"1px solid #1a2e4a",display:"flex",gap:8}}>
+          {step>0&&(
+            <button onClick={()=>setStep(s=>s-1)}
+              style={{flex:1,padding:"11px",borderRadius:10,border:"1px solid #1a2e4a",
+              background:"#05101e",color:"#667",fontSize:13,cursor:"pointer",
+              fontFamily:"Georgia,serif"}}>← Prev</button>
+          )}
+          {!isLast?(
+            <button onClick={()=>setStep(s=>s+1)}
+              style={{flex:2,padding:"11px",borderRadius:10,border:"none",
+              background:`linear-gradient(135deg,${s.color},${s.color}bb)`,
+              color:"#000",fontSize:14,fontWeight:700,cursor:"pointer",
+              fontFamily:"Georgia,serif"}}>Next →</button>
+          ):(
+            <button onClick={onBack}
+              style={{flex:2,padding:"11px",borderRadius:10,border:"none",
+              background:"linear-gradient(135deg,#185FA5,#0C447C)",color:"#fff",
+              fontSize:14,fontWeight:700,cursor:"pointer",fontFamily:"Georgia,serif"}}>
+              🃏 Let's Play!
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════
+// ── Lobby ──
+// ════════════════════════════════════════════════════
+function LobbyScreen({onHost,onJoin,onTutorial}){
+  const [name,setName]=useState("");
+  const [code,setCode]=useState("");
+  const [tab,setTab]=useState("host");
+  const [err,setErr]=useState("");
+
+  function host(){
+    if(!name.trim())return setErr("Enter your name");
+    onHost(name.trim(),genCode());
+  }
+  function join(){
+    if(!name.trim())return setErr("Enter your name");
+    const c=code.trim().toUpperCase();
+    if(!c)return setErr("Enter a room code");
+    if(!ROOMS[c])return setErr("Room not found — check the code and try again.");
+    onJoin(name.trim(),c);
+  }
+
+  return(
+    <div style={{minHeight:"100vh",background:"radial-gradient(ellipse at 50% 30%,#0d1e33,#05101e)",
+      display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"Georgia,serif"}}>
+      <div style={{width:390,padding:"2.5rem",background:"#0d1829",borderRadius:20,
+        border:"1px solid #1a2e4a",boxShadow:"0 30px 80px rgba(0,0,0,0.8)"}}>
+        <div style={{textAlign:"center",marginBottom:"2rem"}}>
+          <div style={{fontSize:52,marginBottom:8}}>🂡</div>
+          <h1 style={{color:"#FAC775",fontSize:30,margin:0,letterSpacing:4}}>HOLD'EM</h1>
+          <p style={{color:"#334",fontSize:12,margin:"5px 0 0",letterSpacing:2}}>TEXAS POKER</p>
+        </div>
+
+        <div style={{display:"flex",background:"#05101e",borderRadius:10,padding:3,marginBottom:18}}>
+          {["host","join"].map(t=>(
+            <button key={t} onClick={()=>{setTab(t);setErr("");}}
+              style={{flex:1,padding:"9px",borderRadius:8,border:"none",
+              background:tab===t?"#185FA5":"transparent",
+              color:tab===t?"#fff":"#556",fontWeight:tab===t?700:400,
+              cursor:"pointer",fontSize:13,fontFamily:"Georgia,serif",
+              transition:"all 0.2s",letterSpacing:1}}>
+              {t==="host"?"HOST GAME":"JOIN GAME"}
+            </button>
+          ))}
+        </div>
+
+        <div style={{display:"flex",flexDirection:"column",gap:11}}>
+          <input value={name} onChange={e=>{setName(e.target.value);setErr("");}}
+            placeholder="Your name"
+            style={{padding:"11px 14px",borderRadius:10,border:"1px solid #1a2e4a",
+            background:"#05101e",color:"#fff",fontSize:14,fontFamily:"Georgia,serif"}}/>
+          {tab==="join"&&(
+            <input value={code} onChange={e=>{setCode(e.target.value.toUpperCase());setErr("");}}
+              placeholder="Room code  (e.g. X4K2M)" maxLength={5}
+              style={{padding:"11px 14px",borderRadius:10,border:"1px solid #1a2e4a",
+              background:"#05101e",color:"#FAC775",fontSize:20,fontFamily:"monospace",
+              letterSpacing:8,textAlign:"center"}}/>
+          )}
+          {err&&<p style={{color:"#c0392b",fontSize:12,textAlign:"center",margin:0}}>{err}</p>}
+          <button onClick={tab==="host"?host:join}
+            style={{padding:"13px",borderRadius:10,border:"none",
+            background:"linear-gradient(135deg,#185FA5,#0C447C)",color:"#fff",
+            fontSize:15,fontWeight:700,cursor:"pointer",fontFamily:"Georgia,serif",
+            letterSpacing:2,boxShadow:"0 4px 20px rgba(24,95,165,0.4)"}}>
+            {tab==="host"?"CREATE ROOM →":"JOIN ROOM →"}
+          </button>
+          <button onClick={onTutorial}
+            style={{padding:"10px",borderRadius:10,border:"1px solid #1a2e4a",
+            background:"transparent",color:"#7ee8c8",fontSize:13,cursor:"pointer",
+            fontFamily:"Georgia,serif",display:"flex",alignItems:"center",
+            justifyContent:"center",gap:8}}>
+            📖 How to Play (Tutorial)
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════
+// ── App Root ──
+// ════════════════════════════════════════════════════
+function App(){
+  const [screen,setScreen]=useState("lobby");
+  const [room,setRoom]=useState(null);
+  const [player,setPlayer]=useState(null);
+  const [chat,setChat]=useState([{name:"System",text:"Welcome to Hold'em! 🃏"}]);
+
+  function addChat(name,text){setChat(c=>[...c,{name,text}]);}
+
+  function handleHost(name,code){
+    const p={id:Date.now().toString(),name,avatar:"🧑",isBot:false};
+    const r={code,hostId:p.id,players:[p]};
+    ROOMS[code]=r;
+    setRoom(r);setPlayer(p);setScreen("waiting");
+    addChat("System",`Room ${code} created! Share this code with friends.`);
+  }
+
+  function handleJoin(name,code){
+    if(!ROOMS[code]){return;}
+    const p={id:Date.now().toString()+Math.floor(Math.random()*9999),name,avatar:"🧑",isBot:false};
+    // Avoid duplicate IDs
+    if(ROOMS[code].players.find(x=>x.id===p.id))p.id+="x";
+    ROOMS[code].players.push(p);
+    setRoom({...ROOMS[code]});setPlayer(p);setScreen("waiting");
+    addChat("System",`${name} joined the table!`);
+  }
+
+  function handleAddBot(difficulty="easy"){
+    if(!room||room.players.length>=6)return;
+    const used=room.players.map(p=>p.name);
+    const avail=BOT_NAMES.filter(n=>!used.includes(n));
+    const bname=avail[0]||`Bot${room.players.length}`;
+    const ai=BOT_NAMES.indexOf(bname);
+    const bot={id:"bot_"+Date.now(),name:bname,
+      avatar:BOT_AVATARS[ai>=0?ai:0],isBot:true,difficulty};
+    const updated={...room,players:[...room.players,bot]};
+    ROOMS[room.code]=updated;setRoom(updated);
+    addChat("System",`${bname} (${DIFF[difficulty]?.label} bot) joined!`);
+  }
+
+  function handleStart(){
+    const updated={...room,started:true};
+    ROOMS[room.code]=updated;setRoom({...updated});
+    setScreen("game");
+    addChat("System","Cards are being dealt… good luck! 🃏");
+  }
+
+  return(
+    <div>
+      {screen==="lobby"   &&<LobbyScreen onHost={handleHost} onJoin={handleJoin} onTutorial={()=>setScreen("tutorial")}/>}
+      {screen==="tutorial"&&<TutorialScreen onBack={()=>setScreen("lobby")}/>}
+      {screen==="waiting" &&room&&player&&
+        <WaitingRoom room={room} player={player} onAddBot={handleAddBot}
+          onStart={handleStart} chat={chat} onChat={addChat}/>}
+      {screen==="game"    &&room&&player&&
+        <GameTable room={room} humanPlayer={player} chat={chat} onChat={addChat}/>}
+    </div>
+  );
+}
+
+const root=ReactDOM.createRoot(document.getElementById("root"));
+root.render(<App/>);
+</script>
+</body>
+</html>
